@@ -76,11 +76,58 @@ function InterviewHome({ params, searchParams }: Props) {
   const [initialSeekSec, setInitialSeekSec] = useState(0);
   const videoPlayerRef = useRef<VideoPlayerHandle>(null);
 
+  // 让视频窗口顶端始终与右侧"面试记录"卡片顶端对齐：
+  //   - "面试记录"在右侧，前面有总体概要 / 问题概要等卡片，Y 位置因数据而变
+  //   - 用 ref + ResizeObserver 测量两个元素 BoundingClientRect.top，差值喂给 marginTop
+  //   - 用 viewport 坐标比较，因为左右两栏处于不同 flex child，offsetTop 不在同一坐标系
+  const interviewLogRef = useRef<HTMLDivElement | null>(null);
+  const videoSlotRef = useRef<HTMLDivElement | null>(null);
+  const [videoSlotMarginTop, setVideoSlotMarginTop] = useState(0);
+
+  useEffect(() => {
+    if (!resolvedSearchParams.call) return;
+
+    const measure = () => {
+      const target = interviewLogRef.current;
+      const slot = videoSlotRef.current;
+      if (!target || !slot) return;
+      const targetY = target.getBoundingClientRect().top;
+      const slotY = slot.getBoundingClientRect().top;
+      const delta = targetY - slotY;
+      // 用 functional setter 把 delta 加到当前 marginTop 上（自动收敛对齐）。
+      // 阈值 1px 以下不更新，避免亚像素抖动死循环。
+      if (Math.abs(delta) > 1) {
+        setVideoSlotMarginTop((prev) => Math.max(0, prev + delta));
+      }
+    };
+
+    // 首次测量在下一个 paint 之后，确保 DOM 已经布局完
+    const raf = requestAnimationFrame(measure);
+
+    // ResizeObserver 监听"面试记录"自身和它前面所有 cards 的尺寸变化
+    const observer = new ResizeObserver(measure);
+    if (interviewLogRef.current) {
+      observer.observe(interviewLogRef.current);
+      // 父容器（CallInfo 主 div）的尺寸变化也意味着前面 cards 的高度可能变了
+      const callInfoRoot = interviewLogRef.current.parentElement;
+      if (callInfoRoot) observer.observe(callInfoRoot);
+    }
+    window.addEventListener("resize", measure);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+    // 当切换 call、analytics 重新加载时都重新挂载 observer
+  }, [resolvedSearchParams.call]);
+
   // 切换面试 / 切换 call 时关闭播放器避免状态串
   useEffect(() => {
     setIsVideoOpen(false);
     setCurrentVideoSec(0);
     setInitialSeekSec(0);
+    setVideoSlotMarginTop(0); // 也重置对齐偏移，新内容会重新测量
   }, [resolvedSearchParams.call]);
 
   // Q/A markers：从 turns 派生
@@ -598,11 +645,16 @@ function InterviewHome({ params, searchParams }: Props) {
               </ScrollArea>
 
               {/* 视频播放器槽位 —— 跟随页面布局（不悬浮）。仅在选中某个 call 时显示。
+                  - 顶端动态对齐右侧"面试记录"卡片顶端（marginTop 来自 useEffect 测量）
                   - 没视频/未打开：浅色占位框（用户感受到这里有内容入口）
                   - 用户点"播放视频"按钮 → 下面真的挂上 video 自动开播
                   - 进度条上叠加 Q/A markers，点 marker 可跳转到对应问答 */}
               {resolvedSearchParams.call && (
-                <div className="mt-3 mb-1">
+                <div
+                  ref={videoSlotRef}
+                  className="mb-1"
+                  style={{ marginTop: videoSlotMarginTop }}
+                >
                   <VideoPlayer
                     ref={videoPlayerRef}
                     src={videoData.videoUrl}
@@ -652,6 +704,7 @@ function InterviewHome({ params, searchParams }: Props) {
                     onVideoData={setVideoData}
                     onOpenVideo={onOpenVideo}
                     onSeekToTurn={onSeekToTurn}
+                    interviewLogRef={interviewLogRef}
                   />
                 ) : resolvedSearchParams.edit ? (
                   <EditInterview interview={interview} />

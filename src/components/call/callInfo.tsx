@@ -62,6 +62,8 @@ type CallProps = {
   onOpenVideo?: (initialSec: number) => void;
   /** 用户点 Q/A 时请求 seek（播放器已打开）/ 打开播放器并 seek（未打开） */
   onSeekToTurn?: (turnIndex: number) => void;
+  /** 父页面传进来的 ref，挂到"面试记录"卡片上，用于左侧视频播放器对齐 */
+  interviewLogRef?: React.MutableRefObject<HTMLDivElement | null>;
 };
 
 function CallInfo({
@@ -73,6 +75,7 @@ function CallInfo({
   onVideoData,
   onOpenVideo,
   onSeekToTurn,
+  interviewLogRef,
 }: CallProps) {
   const [call, setCall] = useState<CallData>();
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
@@ -603,7 +606,7 @@ function CallInfo({
               </div>
             </div>
           )}
-          <div className="bg-slate-200 rounded-2xl min-h-[150px] max-h-[500px] p-4 px-5 mb-[150px]">
+          <div ref={interviewLogRef} className="bg-slate-200 rounded-2xl min-h-[150px] max-h-[500px] p-4 px-5 mb-[150px]">
             <div className="flex items-center justify-between my-2 mb-4">
               <p className="font-semibold">{t("response.interviewLog")}</p>
               {/* 视频播放按钮：有视频→请求父页面打开左侧栏播放器；没视频→灰显并提示原因 */}
