@@ -36,7 +36,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "invalid content_type" }, { status: 400 });
     }
 
-    const objectKey = getCallVideoObjectKey(callId);
+    // 文件后缀按 contentType 决定，浏览器才能按 URL 嗅探到正确 mime
+    const ext = contentType.startsWith("video/mp4") ? "mp4" : "webm";
+    const objectKey = getCallVideoObjectKey(callId, ext);
     const { uploadUrl, publicUrl } = getPresignedPutUrl(objectKey, contentType);
 
     logger.info(`[upload-call-video] signed url for call=${callId} key=${objectKey}`);

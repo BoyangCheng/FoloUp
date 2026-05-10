@@ -32,6 +32,9 @@ export async function POST(req: NextRequest) {
     const positionStr = url.searchParams.get("position") ?? "0";
     const isFirst = url.searchParams.get("first") === "1";
     const objectKeyParam = (url.searchParams.get("object_key") ?? "").trim();
+    // content_type 只在首片有效（OSS append 不允许后续改 Content-Type）。
+    // 默认 webm（向后兼容老前端不传的情况）；iOS Safari 会传 video/mp4
+    const contentType = (url.searchParams.get("content_type") ?? "video/webm").trim();
 
     if (!callId || !/^[A-Za-z0-9_-]{1,64}$/.test(callId)) {
       return NextResponse.json({ error: "invalid call_id" }, { status: 400 });
@@ -40,12 +43,18 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(position) || position < 0) {
       return NextResponse.json({ error: "invalid position" }, { status: 400 });
     }
+    // mime 白名单：只允许 webm / mp4，防止伪造任意 Content-Type 写入
+    if (!/^video\/(webm|mp4)(;.*)?$/.test(contentType)) {
+      return NextResponse.json({ error: "invalid content_type" }, { status: 400 });
+    }
 
-    // 首片：服务端生成 objectKey 并把控其唯一性（防客户端伪造他人 key）
+    // 首片：服务端生成 objectKey 并把控其唯一性（防客户端伪造他人 key）。
+    // 文件后缀按 contentType 决定：mp4 mime → .mp4 / 其他 → .webm
     // 后续片：必须带回首片返回的 objectKey，且必须以 call-videos/{callId}/ 开头
     let objectKey: string;
     if (isFirst) {
-      objectKey = getCallVideoObjectKey(callId);
+      const ext = contentType.startsWith("video/mp4") ? "mp4" : "webm";
+      objectKey = getCallVideoObjectKey(callId, ext);
     } else {
       objectKey = objectKeyParam;
       const expectedPrefix = `call-videos/${callId}/`;
@@ -61,7 +70,13 @@ export async function POST(req: NextRequest) {
     }
     const buffer = Buffer.from(arrayBuffer);
 
-    const result = await appendToOSS(objectKey, buffer, position);
+    // 首片传 contentType 让 OSS 把对象 Content-Type 设对，后续片不传
+    const result = await appendToOSS(
+      objectKey,
+      buffer,
+      position,
+      isFirst ? contentType : undefined,
+    );
 
     return NextResponse.json(
       {

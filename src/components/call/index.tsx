@@ -746,9 +746,14 @@ function Call({ interview }: InterviewProps) {
           let mimeType = "";
           if (typeof MediaRecorder !== "undefined") {
             for (const candidate of [
+              // 桌面 Chrome/Firefox/Edge + Android Chrome 主路径
               "video/webm;codecs=vp9,opus",
               "video/webm;codecs=vp8,opus",
               "video/webm",
+              // iOS Safari / WeChat iOS / 任何 WKWebView 走 mp4 fallback
+              // Safari MediaRecorder 输出 fragmented MP4，理论上可顺序 append 拼接
+              "video/mp4;codecs=h264,aac",
+              "video/mp4",
             ]) {
               if (MediaRecorder.isTypeSupported(candidate)) {
                 mimeType = candidate;
@@ -800,8 +805,14 @@ function Call({ interview }: InterviewProps) {
                     call_id: callIdAtStart,
                     position: String(streamPositionRef.current),
                   });
-                  if (isFirst) params.set("first", "1");
-                  else params.set("object_key", streamObjectKeyRef.current!);
+                  if (isFirst) {
+                    params.set("first", "1");
+                    // 首片必须告诉后端 mime，让 OSS objectKey 带正确扩展名 + 设对 Content-Type
+                    // 取 recorder.mimeType（含 codecs 后缀也没事，后端正则容忍）
+                    params.set("content_type", recorder.mimeType || "video/webm");
+                  } else {
+                    params.set("object_key", streamObjectKeyRef.current!);
+                  }
 
                   const buf = await chunk.arrayBuffer();
                   const res = await fetch(

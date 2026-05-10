@@ -21,8 +21,17 @@ describe("getCallVideoObjectKey", () => {
     expect(key.startsWith("call-videos/abc123/")).toBe(true);
   });
 
-  it("以 .webm 结尾（前端固定录制 webm）", () => {
+  it("默认 .webm 结尾（桌面 Chrome / Android 主路径）", () => {
     expect(getCallVideoObjectKey("abc123")).toMatch(/\.webm$/);
+  });
+
+  it("ext='mp4' 时切到 .mp4 结尾（iOS Safari fallback）", () => {
+    expect(getCallVideoObjectKey("abc123", "mp4")).toMatch(/\.mp4$/);
+    expect(getCallVideoObjectKey("abc123", "mp4")).not.toMatch(/\.webm$/);
+  });
+
+  it("ext='webm' 显式传也工作", () => {
+    expect(getCallVideoObjectKey("abc123", "webm")).toMatch(/\.webm$/);
   });
 
   it("包含调用时刻的毫秒时间戳，相同 callId 不同时刻不撞 key", () => {
