@@ -118,3 +118,33 @@
   width: 100px !important;
   height: 100px !important;
 }
+
+/* Dashboard 同岗位面试横向滚动行：默认滚动条透明（不打扰），hover 时显示
+   - Firefox 用 scrollbar-color/width
+   - WebKit (Chrome/Safari/Edge) 用 ::-webkit-scrollbar pseudo-elements
+   - 拖动时（active）颜色更深，符合系统默认行为 */
+.interview-row-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s;
+}
+.interview-row-scroll:hover {
+  scrollbar-color: rgba(99, 102, 241, 0.5) transparent; /* indigo-500 半透明 */
+}
+.interview-row-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+.interview-row-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.interview-row-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+.interview-row-scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.5); /* indigo-500 */
+}
+.interview-row-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.8); /* hover 在 thumb 上时更深 */
+}

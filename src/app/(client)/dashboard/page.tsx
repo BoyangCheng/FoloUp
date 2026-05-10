@@ -172,7 +172,7 @@ function Interviews() {
                       ({group.items.length})
                     </span>
                   </h3>
-                  <div className="flex flex-row overflow-x-auto pb-2 scrollbar-hide">
+                  <div className="interview-row-scroll flex flex-row overflow-x-auto pb-2">
                     {group.items.map((item) => (
                       <InterviewCard
                         id={item.id}
