@@ -99,8 +99,11 @@ const createInterview = async (payload: any): Promise<null> => {
     invalidateCache("interviews:");
     return null;
   } catch (error) {
-    console.log(error);
-    return null;
+    // 之前是 console.log + return null —— 把 INSERT 失败当成功，
+    // 表少列时全部新建静默落不了盘，dashboard 上看到的都是老数据。
+    // 现在 throw，create-interview API 会返 500，前端能感知到。
+    console.error("[createInterview] INSERT failed:", error);
+    throw error;
   }
 };
 

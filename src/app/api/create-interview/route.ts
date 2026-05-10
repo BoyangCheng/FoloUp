@@ -46,8 +46,12 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ response: "Interview created successfully" }, { status: 200 });
   } catch (err) {
-    logger.error("Error creating interview");
-
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    // 把真实错误抛回前端，方便排查（比如 "column job_id does not exist" → 提示该跑 migration）
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`Error creating interview: ${msg}`);
+    return NextResponse.json(
+      { error: "Internal server error", detail: msg },
+      { status: 500 },
+    );
   }
 }
