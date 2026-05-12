@@ -15,7 +15,7 @@
 //     流量高峰时 DB 被同一错误刷爆。
 // ---------------------------------------------------------------------------
 
-export type ErrorLogLevel = "error" | "warn" | "fatal";
+export type ErrorLogLevel = "info" | "error" | "warn" | "fatal";
 export type ErrorLogSource = "api" | "client" | "service" | "background";
 
 export interface ErrorLogInput {
