@@ -260,7 +260,10 @@ export async function startVoiceChat(params: StartVoiceChatParams) {
           StreamMode: 2,
         },
         VADConfig: {
-          SilenceTime: 1000,
+          // 候选人停顿超过这个时长(ms),VAD 判定为"回答结束"触发 ASR final
+          // 2500ms:候选人长时间思考也不会被切(适合面试场景常见的"嗯...让我想想...")
+          // 代价:AI 响应总延迟 ~4.3 秒 (候选人话停后)
+          SilenceTime: 2500,
         },
         InterruptConfig: {
           InterruptSpeechDuration: 300,
