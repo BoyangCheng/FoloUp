@@ -235,6 +235,19 @@ export async function GET(request: NextRequest) {
       path: "/",
     });
 
+    // 存 Authing 原始 id_token,用于 logout 时作为 id_token_hint 传给 /oidc/session/end
+    // 没有这个 OIDC server 会拒绝执行 post_logout_redirect_uri 跳转(安全策略),
+    // 用户会卡在 Authing "登出成功"页而不是回到 /sign-in
+    if (tokens.id_token && typeof tokens.id_token === "string") {
+      response.cookies.set("authing_id_token", tokens.id_token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 60 * 60 * 24 * 7,
+        path: "/",
+      });
+    }
+
     return response;
   } catch (err) {
     // 把堆栈信息全部打出来，方便从容器日志定位 502 的真正源头

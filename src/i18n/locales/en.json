@@ -65,6 +65,7 @@
     "versionStaleReloading": "Page out of date, refreshing...",
     "micCameraDenied": "Microphone/camera permission denied. Click the 🔒 icon in the browser address bar → Site settings → Allow microphone and camera, then refresh.",
     "duplicateQuestionEnded": "AI repeated a question already asked. The interview has been ended automatically.",
+    "cameraNotDetected": "No camera detected. This interview will be audio-only (full audio + transcript preserved).",
     "endInterview": "End Interview",
     "exit": "Exit",
     "endCallConfirm": "This action cannot be undone. This action will end the call.",

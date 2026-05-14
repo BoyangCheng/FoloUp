@@ -41,17 +41,18 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(position) || position < 0) {
       return NextResponse.json({ error: "invalid position" }, { status: 400 });
     }
-    // mime 白名单：只允许 webm / mp4，防止伪造任意 Content-Type 写入
-    if (!/^video\/(webm|mp4)(;.*)?$/.test(contentType)) {
+    // mime 白名单：允许 video/webm | video/mp4 | audio/webm | audio/mp4
+    // 没摄像头的候选人会降级成 audio-only 录制(audio/webm 或 audio/mp4)
+    if (!/^(video|audio)\/(webm|mp4)(;.*)?$/.test(contentType)) {
       return NextResponse.json({ error: "invalid content_type" }, { status: 400 });
     }
 
     // 首片：服务端生成 objectKey 并把控其唯一性（防客户端伪造他人 key）。
-    // 文件后缀按 contentType 决定：mp4 mime → .mp4 / 其他 → .webm
+    // 文件后缀按 contentType 决定：(video|audio)/mp4 → .mp4 / 其他 → .webm
     // 后续片：必须带回首片返回的 objectKey，且必须以 call-videos/{callId}/ 开头
     let objectKey: string;
     if (isFirst) {
-      const ext = contentType.startsWith("video/mp4") ? "mp4" : "webm";
+      const ext = /\/mp4(;|$)/.test(contentType) ? "mp4" : "webm";
       objectKey = getCallVideoObjectKey(callId, ext);
     } else {
       objectKey = objectKeyParam;

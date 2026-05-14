@@ -28,6 +28,16 @@ import {
   shouldForceEnd,
   shouldSendTimeUpWarning,
 } from "@/lib/interview-timing";
+import {
+  SFX_FIRST_DELAY_MAX_MS,
+  SFX_FIRST_DELAY_MIN_MS,
+  SFX_INTERVAL_MAX_MS,
+  SFX_INTERVAL_MIN_MS,
+  SFX_MAX_PER_CALL,
+  SFX_VOLUME,
+  pickRandomSFX,
+  randomDelay,
+} from "@/lib/interviewer-sfx";
 import { findMatchingQuestion } from "@/lib/question-matcher";
 import { appendTurn, type TranscriptEntry as PersistedTurn } from "@/lib/transcript";
 import { isLightColor, testEmail } from "@/lib/utils";
@@ -38,7 +48,7 @@ import type { Interview } from "@/types/interview";
 import type { FeedbackData } from "@/types/response";
 import VERTC, { MediaType, RoomProfileType, StreamIndex } from "@volcengine/rtc";
 import axios from "axios";
-import { AlarmClockIcon, CheckCircleIcon, XCircleIcon } from "lucide-react";
+import { AlarmClockIcon, CheckCircleIcon, User, XCircleIcon } from "lucide-react";
 import Image from "next/image";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
@@ -181,6 +191,13 @@ function Call({ interview }: InterviewProps) {
   const askedMainQuestionsRef = useRef<Set<number>>(new Set());
   const duplicateEndTriggeredRef = useRef(false);
   const forceEndSentRef = useRef(false);
+
+  // 面试官"做笔记"环境音效:候选人说话时随机播放打字/写字/翻纸/喝水等短音效
+  // 模拟面试官在认真听+记录,缓解全 AI 面试的空洞感
+  // 独立 Audio 元素播放,不接入 MediaRecorder → 录像不会被捕获
+  const sfxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sfxFiredRef = useRef(false); // 当前 user turn 内是否已播过(用于切换 first vs interval delay)
+  const sfxTotalCountRef = useRef(0); // 整场面试已播次数,超 SFX_MAX_PER_CALL 后不再播
 
   // Attach camera stream to <video> element once it is mounted.
   // The <video> is only rendered when isStarted becomes true, so we need
@@ -404,6 +421,64 @@ function Call({ interview }: InterviewProps) {
     };
   }, []);
 
+  // ════════════════════════════════════════════════════════════════
+  // 面试官"做笔记"环境音效驱动 ——
+  // 候选人说话(activeTurn==="user")时,启动 timer 循环随机播放;
+  // AI 说话或面试未启动/已结束 → 停止
+  // ════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (sfxTimerRef.current) {
+      clearTimeout(sfxTimerRef.current);
+      sfxTimerRef.current = null;
+    }
+
+    // 不是候选人 turn / 未通话中 / 已结束 → 不播,顺手 reset firedRef 让下次切回
+    // 候选人时使用 "first delay"(更长)而不是 "interval delay"
+    if (activeTurn !== "user" || !isCalling || isEnded) {
+      sfxFiredRef.current = false;
+      return;
+    }
+
+    if (sfxTotalCountRef.current >= SFX_MAX_PER_CALL) return;
+
+    const scheduleNext = () => {
+      const delay = sfxFiredRef.current
+        ? randomDelay(SFX_INTERVAL_MIN_MS, SFX_INTERVAL_MAX_MS)
+        : randomDelay(SFX_FIRST_DELAY_MIN_MS, SFX_FIRST_DELAY_MAX_MS);
+      sfxTimerRef.current = setTimeout(() => {
+        // 触发时再次检查 —— 此刻候选人可能已经说完了
+        if (activeTurn !== "user" || !isCalling || isEnded) return;
+        if (sfxTotalCountRef.current >= SFX_MAX_PER_CALL) return;
+
+        const url = pickRandomSFX();
+        try {
+          const audio = new Audio(url);
+          audio.volume = SFX_VOLUME;
+          audio.play().catch((err) => {
+            // 文件不存在 / autoplay 阻止等都走这,不抛只 warn
+            console.warn("[SFX] play failed:", url, err);
+          });
+          sfxFiredRef.current = true;
+          sfxTotalCountRef.current += 1;
+          console.log(`[SFX] played ${url}, total=${sfxTotalCountRef.current}`);
+        } catch (err) {
+          console.warn("[SFX] new Audio threw:", err);
+        }
+
+        scheduleNext();
+      }, delay);
+    };
+
+    scheduleNext();
+
+    return () => {
+      if (sfxTimerRef.current) {
+        clearTimeout(sfxTimerRef.current);
+        sfxTimerRef.current = null;
+      }
+    };
+  }, [activeTurn, isCalling, isEnded]);
+
   // -------------------------------------------------------------------------
   // Email validation
   // -------------------------------------------------------------------------
@@ -583,6 +658,11 @@ function Call({ interview }: InterviewProps) {
     if (endTimeoutRef.current) {
       clearTimeout(endTimeoutRef.current);
       endTimeoutRef.current = null;
+    }
+    // 清掉环境音效 timer,避免面试结束后还在排队播放
+    if (sfxTimerRef.current) {
+      clearTimeout(sfxTimerRef.current);
+      sfxTimerRef.current = null;
     }
 
     // 1. 先停 MediaRecorder（必须在 camera tracks 停止前），等最后一片 chunk flush
@@ -816,22 +896,48 @@ function Call({ interview }: InterviewProps) {
         // Volcengine RTC 会自己再 getUserMedia 拿一份做 ASR，Chrome 允许同一 mic 被
         //   多个 stream 同时读取，实测无冲突。
         // 视频参数：desktop 192×256@12fps@80kbps,mobile 128×172@6fps(等比缩小,减半负担)
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: "user",
-            width: { ideal: isMobileDevice ? 128 : 192 },
-            height: { ideal: isMobileDevice ? 172 : 256 },
-            frameRate: {
-              ideal: isMobileDevice ? 6 : 12,
-              max: isMobileDevice ? 8 : 12,
+        // 没摄像头的候选人(NotFoundError / OverconstrainedError)自动降级只录音频,
+        // 让他们也能完成面试(录像里只有音频,HR 看回放时无画面但有声 + transcript)
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: "user",
+              width: { ideal: isMobileDevice ? 128 : 192 },
+              height: { ideal: isMobileDevice ? 172 : 256 },
+              frameRate: {
+                ideal: isMobileDevice ? 6 : 12,
+                max: isMobileDevice ? 8 : 12,
+              },
             },
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+        } catch (firstErr) {
+          const errName = (firstErr as Error)?.name;
+          // 只对"没设备 / constraints 不支持"降级,NotAllowedError 等让外层处理
+          if (errName !== "NotFoundError" && errName !== "OverconstrainedError") {
+            throw firstErr;
+          }
+          // Fallback: 只录音频
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+          toast.warning(t("interview.cameraNotDetected"), { duration: 6000 });
+          reportClientError({
+            kind: "manual",
+            level: "info",
+            message: `[CAM-DEBUG] fallback to audio-only recording (${errName})`,
+            extra: { errName, callId: call_id, isMobile: isMobileDevice },
+          });
+        }
         cameraStreamRef.current = stream;
         setCameraStream(stream);
 
@@ -864,30 +970,42 @@ function Call({ interview }: InterviewProps) {
 
         // 启动 MediaRecorder 录制 — 仅在 is_video_enabled=true 时执行
         // 即使关闭录像，前面的 getUserMedia 也已经跑过，候选人能看到自己画面
+        // 没视频 track = audio-only fallback 路径,MediaRecorder 用 audio mimeType
+        const hasVideoTrack = stream.getVideoTracks().length > 0;
         if (recordingEnabled) try {
           let mimeType = "";
-          // 探测每个候选 mimeType 的支持情况，全部记下来发到 error_log
+          // 探测每个候选 mimeType 的支持情况,全部记下来发到 error_log
           // 这样 iOS 微信复现时直接能看到："webm 全 false、mp4 全 false" → 根因是 MediaRecorder 不支持
           const probeResult: Record<string, boolean> = {};
           if (typeof MediaRecorder !== "undefined") {
-            // mobile: H264 通常有硬件加速,优先;VP9 fallback
-            // desktop: VP9 软编 CPU 占用可控,优先(更小文件)
-            // (B 优化: mobile 用 H264 减少编码 CPU,给 RTC 音频解码线程腾出资源)
-            const candidates = isMobileDevice
-              ? [
-                  "video/mp4;codecs=h264,aac",
-                  "video/mp4",
-                  "video/webm;codecs=vp8,opus",
-                  "video/webm;codecs=vp9,opus",
-                  "video/webm",
-                ]
-              : [
-                  "video/webm;codecs=vp9,opus",
-                  "video/webm;codecs=vp8,opus",
-                  "video/webm",
-                  "video/mp4;codecs=h264,aac",
-                  "video/mp4",
-                ];
+            let candidates: string[];
+            if (!hasVideoTrack) {
+              // 纯音频 fallback:优先 webm/opus,次之 mp4/aac
+              candidates = [
+                "audio/webm;codecs=opus",
+                "audio/webm",
+                "audio/mp4;codecs=aac",
+                "audio/mp4",
+              ];
+            } else if (isMobileDevice) {
+              // mobile: H264 通常有硬件加速,优先;VP9 fallback
+              candidates = [
+                "video/mp4;codecs=h264,aac",
+                "video/mp4",
+                "video/webm;codecs=vp8,opus",
+                "video/webm;codecs=vp9,opus",
+                "video/webm",
+              ];
+            } else {
+              // desktop: VP9 软编 CPU 占用可控,优先(更小文件)
+              candidates = [
+                "video/webm;codecs=vp9,opus",
+                "video/webm;codecs=vp8,opus",
+                "video/webm",
+                "video/mp4;codecs=h264,aac",
+                "video/mp4",
+              ];
+            }
             for (const candidate of candidates) {
               const supported = MediaRecorder.isTypeSupported(candidate);
               probeResult[candidate] = supported;
@@ -1075,8 +1193,29 @@ function Call({ interview }: InterviewProps) {
           });
         }
       } catch (camErr) {
-        // 摄像头被拒不阻塞面试本身
-        void camErr;
+        // 摄像头/麦克风获取失败不阻塞面试通话(RTC SDK 内部独立 getUserMedia)
+        // 但必须上报,否则录像没了 error_log 还啥也没有 —— 排查黑洞
+        // 常见错误名:
+        //   NotAllowedError    用户拒绝权限
+        //   NotFoundError      没有摄像头/麦克风设备
+        //   NotReadableError   设备被其他 app 占用
+        //   OverconstrainedError  width/height/frameRate 设置不被支持
+        //   SecurityError      非 HTTPS / iframe 限制
+        const err = camErr as Error | undefined;
+        const errName = err?.name ?? "Unknown";
+        const errMessage = err?.message ?? String(camErr);
+        console.warn("[CAM-DEBUG] getUserMedia + recorder block failed:", errName, errMessage);
+        reportClientError({
+          kind: "manual",
+          level: "warn",
+          message: `[CAM-DEBUG] getUserMedia failed (${errName}) — 录像跳过`,
+          extra: {
+            errName,
+            errMessage,
+            isMobile: getDeviceClass().isMobile,
+            callId: call_id,
+          },
+        });
       }
 
       // Transition UI to the in-call view so the <video> element mounts and
@@ -1461,6 +1600,8 @@ function Call({ interview }: InterviewProps) {
   // 白底里，下沿和外围 gray 之间出现一段白条；去掉 bg-white 后 watermirror 自然
   // 坐在 gray 上，整页颜色统一
   // items-start 让 Card 贴顶不再有上方留白；外围背景从 gray 改 white（按用户要求）
+  // 候选人没摄像头时 cameraStream 只有 audio track,UI 显示 placeholder 替代 <video> 黑屏
+  const hasVideoTrackUI = (cameraStream?.getVideoTracks().length ?? 0) > 0;
   return (
     <div className="flex justify-center items-start min-h-screen bg-white pt-2">
       {isStarted && !isEnded && <TabSwitchWarning />}
@@ -1686,23 +1827,38 @@ function Call({ interview }: InterviewProps) {
                       <div className="font-semibold text-xs mt-2">{t("interview.interviewer")}</div>
                     </div>
 
-                    {/* 你头像 (video) + label */}
+                    {/* 你头像 (video / 没摄像头时 placeholder) + label */}
                     <div className="flex flex-col items-center">
-                      <video
-                        ref={videoRefMobile}
-                        autoPlay
-                        playsInline
-                        muted
-                        className={`w-[90px] h-[90px] object-cover rounded-full ${
-                          activeTurn === "user" ? "border-4 talking-pulse" : ""
-                        }`}
-                        style={{
-                          transform: "scaleX(-1)",
-                          ...(activeTurn === "user"
-                            ? { borderColor: interview.theme_color ?? "#4F46E5" }
-                            : {}),
-                        }}
-                      />
+                      {hasVideoTrackUI ? (
+                        <video
+                          ref={videoRefMobile}
+                          autoPlay
+                          playsInline
+                          muted
+                          className={`w-[90px] h-[90px] object-cover rounded-full ${
+                            activeTurn === "user" ? "border-4 talking-pulse" : ""
+                          }`}
+                          style={{
+                            transform: "scaleX(-1)",
+                            ...(activeTurn === "user"
+                              ? { borderColor: interview.theme_color ?? "#4F46E5" }
+                              : {}),
+                          }}
+                        />
+                      ) : (
+                        <div
+                          className={`w-[90px] h-[90px] rounded-full bg-indigo-100 flex items-center justify-center ${
+                            activeTurn === "user" ? "border-4 talking-pulse" : ""
+                          }`}
+                          style={
+                            activeTurn === "user"
+                              ? { borderColor: interview.theme_color ?? "#4F46E5" }
+                              : undefined
+                          }
+                        >
+                          <User size={36} className="text-indigo-400" />
+                        </div>
+                      )}
                       <div className="font-semibold text-xs mt-2">{t("interview.you")}</div>
                     </div>
                   </div>
@@ -1752,21 +1908,36 @@ function Call({ interview }: InterviewProps) {
                       {lastUserResponse}
                     </div>
                     <div className="flex flex-col mx-auto justify-center items-center mt-auto pt-6">
-                      <video
-                        ref={videoRefDesktop}
-                        autoPlay
-                        playsInline
-                        muted
-                        className={`w-[160px] h-[160px] object-cover rounded-full mx-auto ${
-                          activeTurn === "user" ? "border-4 talking-pulse" : ""
-                        }`}
-                        style={{
-                          transform: "scaleX(-1)",
-                          ...(activeTurn === "user"
-                            ? { borderColor: interview.theme_color ?? "#4F46E5" }
-                            : {}),
-                        }}
-                      />
+                      {hasVideoTrackUI ? (
+                        <video
+                          ref={videoRefDesktop}
+                          autoPlay
+                          playsInline
+                          muted
+                          className={`w-[160px] h-[160px] object-cover rounded-full mx-auto ${
+                            activeTurn === "user" ? "border-4 talking-pulse" : ""
+                          }`}
+                          style={{
+                            transform: "scaleX(-1)",
+                            ...(activeTurn === "user"
+                              ? { borderColor: interview.theme_color ?? "#4F46E5" }
+                              : {}),
+                          }}
+                        />
+                      ) : (
+                        <div
+                          className={`w-[160px] h-[160px] rounded-full bg-indigo-100 flex items-center justify-center mx-auto ${
+                            activeTurn === "user" ? "border-4 talking-pulse" : ""
+                          }`}
+                          style={
+                            activeTurn === "user"
+                              ? { borderColor: interview.theme_color ?? "#4F46E5" }
+                              : undefined
+                          }
+                        >
+                          <User size={64} className="text-indigo-400" />
+                        </div>
+                      )}
                       <div className="font-semibold text-base mt-2">{t("interview.you")}</div>
                     </div>
                   </div>
