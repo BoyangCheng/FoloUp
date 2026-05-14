@@ -19,6 +19,13 @@ export interface InterviewBase {
   time_duration: string;
   is_anonymous: boolean;
   questions: Question[];
+  /**
+   * HR / 候选人 UI 都不展示的"暗藏题库"。
+   * 候选人页 startVoiceChat 前会把 questions + extra_questions 合并后再喂给 AI，
+   * 防止 AI 问完主清单后时间没到就开始重复问。
+   * 老数据没这字段时按 [] 兜底；migration 加了 NOT NULL DEFAULT '[]' 之后新插入都不会为 null。
+   */
+  extra_questions?: Question[];
   description: string;
   response_count: bigint;
   language: "zh" | "en";

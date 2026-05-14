@@ -91,6 +91,18 @@ function QuestionsPopup({ interviewData, extraQuestions = [], setProceed, setOpe
       interviewData.questions = questions;
       interviewData.description = description;
 
+      // 暗藏题库:取 HR 没选进主清单的备用问题前 3 条,存到 extra_questions。
+      //   - 候选人页拿全量 interview 后会把 questions + extra_questions 一起喂给 AI
+      //   - HR 永远看不到这些题(编辑页 / dashboard 都只渲染 questions)
+      //   - dedup 按 question 文本:防止 HR 已经通过 "+" 把某条 extra 加进主清单后,
+      //     extra_questions 里又出现一遍,导致 AI 拿到重复题。
+      const usedTexts = new Set(
+        questions.map((q) => q.question.trim()).filter((s) => s.length > 0),
+      );
+      interviewData.extra_questions = extraQuestions
+        .filter((eq) => !usedTexts.has(eq.question.trim()))
+        .slice(0, 3);
+
       // Convert BigInts to strings if necessary
       // 不再写 logo_url：候选人页通过 organization_id JOIN 实时取 org.image_url，
       // org logo 改了所有面试自动跟着变。没 logo 时前端 fallback 到 /watermirrorlogo.png。

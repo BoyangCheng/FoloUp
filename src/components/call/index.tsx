@@ -182,15 +182,20 @@ function Call({ interview }: InterviewProps) {
     recorderError: false, // 第一次 MediaRecorder.onerror
   });
 
-  // 主问题追踪 ——
-  // A: AI 字幕 fuzzy 匹配主问题清单,如果匹配到"已问过的"立即强制结束面试
-  //    (LLM 提示词不可靠,客户端兜底)
-  // B: 第一次问到某主问题时,通过 ExternalTextToLLM 给 LLM 推 [STATE] 进度提示
-  // C: 候选人答完最后一题 → 立刻推 [FORCE_END] + 15s 兜底强制结束
-  //    (解决 "AI 问完所有题但时间没到就开始重复问" 的核心问题)
+  // 主问题追踪（纯客户端兜底,不向 LLM 注入任何信号）——
+  //   背景:之前曾通过 ExternalTextToLLM 向 LLM 推 [STATE] / [FORCE_END]，
+  //   但 ExternalTextToLLM 是 user-message 通道,LLM 把它当成"候选人在说话",
+  //   于是诱导 LLM 提前结束面试 / 一次性把所有题塞一句话里。已移除。
+  //
+  // 规则:
+  //   - AI 字幕 fuzzy match 到 questions[i] → 记入 askedMainQuestionsRef
+  //   - 仅当 AI 又匹配到清单"第 1 题"(matchedIdx === 0)且之前已记录过 →
+  //     判定 LLM 已经兜了一圈在循环,1.5s 后客户端强制结束
+  //   - 其它题的重复(matchedIdx > 0)只记日志,不结束
+  //   - 同一个 AI turn 内多句字幕 isFinal,最多触发一次匹配,避免一段话被多次响应
   const askedMainQuestionsRef = useRef<Set<number>>(new Set());
   const duplicateEndTriggeredRef = useRef(false);
-  const forceEndSentRef = useRef(false);
+  const currentAgentTurnMatchedRef = useRef(false);
 
   // 面试官"做笔记"环境音效:候选人说话时随机播放打字/写字/翻纸/喝水等短音效
   // 模拟面试官在认真听+记录,缓解全 AI 面试的空洞感
@@ -834,15 +839,22 @@ function Call({ interview }: InterviewProps) {
         return;
       }
 
+      // 合并 HR 主题库 + extra_questions(HR/UI 看不到的暗藏题库)
+      // → AI 拿到的是合并后的完整清单,数量更长,问完一遍就不容易回头重问。
+      // 候选人 UI 不展示问题列表,合并后对候选人完全无感。
+      const allQuestionsForAI = [
+        ...(interview?.questions ?? []),
+        ...(interview?.extra_questions ?? []),
+      ];
       const data = {
         mins: interview?.time_duration,
         objective: interview?.objective,
         // 带编号 + 换行：让 LLM 能数清楚一共几题、问到第几题，避免循环重问。
         // 配合 buildInterviewerPrompt 里的"共 N 题，问完第 N 题立即结束"硬规则一起生效。
-        questions: interview?.questions
+        questions: allQuestionsForAI
           .map((q, i) => `${i + 1}. ${q.question}`)
           .join("\n"),
-        questionCount: interview?.questions.length ?? 0,
+        questionCount: allQuestionsForAI.length,
         name: name || "not provided",
         language: interview?.language ?? "zh",
       };
@@ -1293,6 +1305,8 @@ function Call({ interview }: InterviewProps) {
           if (!wasAgentTurnRef.current) {
             agentAccumulatedRef.current = "";
             wasAgentTurnRef.current = true;
+            // 新 AI turn 开始 → 允许这一段 AI 说话再做一次 fuzzy match
+            currentAgentTurnMatchedRef.current = false;
           }
           setActiveTurn("agent");
           // 静默探测：partial 也算"在说话"，立即刷新时间戳
@@ -1319,62 +1333,43 @@ function Call({ interview }: InterviewProps) {
               console.log("[Call] closing phrase detected:", parsed.text);
             }
             // ────────────────────────────────────────────────────────────────
-            // A+B: 主问题追踪
-            //   - AI 字幕 fuzzy match 主问题清单
-            //   - 第一次问到 → 记录 + 推 [STATE] 给 LLM(B)
-            //   - 第二次问到同一题 → 立刻强制结束面试(A,因为 LLM 已经在循环了)
+            // 主问题追踪（仅客户端兜底,不向 LLM 注入任何信号）
+            //   - 同一段 AI 说话内 fuzzy match 最多触发一次(currentAgentTurnMatchedRef)
+            //   - 第一次匹配到某题 → 记入 askedMainQuestionsRef
+            //   - 仅当 AI 又问回"清单第 1 题"(matchedIdx === 0)且之前已问过 →
+            //     判定 LLM 在循环,1.5s 后客户端结束
+            //   - matchedIdx > 0 的重复只记日志,不结束
             // ────────────────────────────────────────────────────────────────
-            try {
-              const mainQs = interview?.questions ?? [];
-              const matchedIdx = findMatchingQuestion(parsed.text, mainQs);
-              if (matchedIdx >= 0) {
-                if (
-                  askedMainQuestionsRef.current.has(matchedIdx) &&
-                  !duplicateEndTriggeredRef.current
-                ) {
-                  // A: 重复主问题 → 强制结束面试
-                  duplicateEndTriggeredRef.current = true;
-                  console.warn(
-                    "[Call] 检测到重复主问题 idx=" + matchedIdx + ",强制结束面试",
-                    { text: parsed.text, asked: Array.from(askedMainQuestionsRef.current) },
-                  );
-                  toast.warning(t("interview.duplicateQuestionEnded"), { duration: 6000 });
-                  // 让 AI 先说完当前句,再触发结束
-                  setTimeout(() => handleEndCallRef.current(), 1500);
-                } else if (!askedMainQuestionsRef.current.has(matchedIdx)) {
-                  askedMainQuestionsRef.current.add(matchedIdx);
-                  const total = mainQs.length;
-                  const completed = askedMainQuestionsRef.current.size;
-                  console.log(
-                    `[Call] 主问题进度:已问 ${completed}/${total} 题, 当前 idx=${matchedIdx}`,
-                  );
-                  // B: 推 [STATE] 给 LLM 提示进度
-                  // 最后一题:不说"下一题",直接告诉它听完答案就结束(避免自相矛盾)
-                  const targetAgent = agentUserIdRef.current;
-                  const engineNow = engineRef.current;
-                  if (targetAgent && engineNow) {
-                    const isLast = completed >= total;
-                    const askedList = Array.from(askedMainQuestionsRef.current)
-                      .map((i) => i + 1)
-                      .join(",");
-                    const stateMsg =
-                      `[STATE] 你已开始第 ${matchedIdx + 1}/${total} 题。` +
-                      `已问过的主问题序号:${askedList}。` +
-                      (isLast
-                        ? `这是最后一题,听完候选人回答(允许 1-2 个追问)后,立即用一句话致谢结束面试,不要再问任何主问题。`
-                        : `下一题应该是第 ${matchedIdx + 2} 题。`);
-                    try {
-                      const tlv = buildAgentCtrlMessage("ExternalTextToLLM", stateMsg, 2);
-                      (engineNow as any).sendUserBinaryMessage(targetAgent, tlv.buffer);
-                      console.log("[Call] STATE sent:", stateMsg);
-                    } catch (sendErr) {
-                      console.warn("[Call] failed to send STATE:", sendErr);
-                    }
+            if (!currentAgentTurnMatchedRef.current) {
+              try {
+                const mainQs = interview?.questions ?? [];
+                const matchedIdx = findMatchingQuestion(parsed.text, mainQs);
+                if (matchedIdx >= 0) {
+                  currentAgentTurnMatchedRef.current = true;
+                  const alreadyAsked = askedMainQuestionsRef.current.has(matchedIdx);
+                  if (!alreadyAsked) {
+                    askedMainQuestionsRef.current.add(matchedIdx);
+                    console.log(
+                      `[Call] 主问题进度:已问 ${askedMainQuestionsRef.current.size}/${mainQs.length} 题, 当前 idx=${matchedIdx}`,
+                    );
+                  } else if (matchedIdx === 0 && !duplicateEndTriggeredRef.current) {
+                    // AI 又问回第 1 题 → 兜底结束
+                    duplicateEndTriggeredRef.current = true;
+                    console.warn(
+                      "[Call] AI 又问回第一题,强制结束面试",
+                      { text: parsed.text, asked: Array.from(askedMainQuestionsRef.current) },
+                    );
+                    toast.warning(t("interview.duplicateQuestionEnded"), { duration: 6000 });
+                    setTimeout(() => handleEndCallRef.current(), 1500);
+                  } else {
+                    console.warn(
+                      `[Call] AI 重复问到 idx=${matchedIdx},但非第 1 题,忽略`,
+                    );
                   }
                 }
+              } catch (matchErr) {
+                console.warn("[Call] question match check failed:", matchErr);
               }
-            } catch (matchErr) {
-              console.warn("[Call] question match check failed:", matchErr);
             }
           } else {
             // Show accumulated + in-progress partial text
@@ -1399,41 +1394,11 @@ function Call({ interview }: InterviewProps) {
               Date.now(),
               videoStartTimeRef.current || startTimeRef.current || Date.now(),
             );
-            // ────────────────────────────────────────────────────────────────
-            // C: 候选人答完最后一题 → 立刻推 [FORCE_END] 给 LLM + 15s 兜底
-            //   解决 "AI 问完时间没到就重复问" 的核心问题:
-            //   不等 LLM 自己决定结束,候选人答完最后一题就主动指挥 AI 收尾。
-            // ────────────────────────────────────────────────────────────────
-            const totalMain = interview?.questions?.length ?? 0;
-            if (
-              totalMain > 0 &&
-              askedMainQuestionsRef.current.size >= totalMain &&
-              !forceEndSentRef.current &&
-              !duplicateEndTriggeredRef.current
-            ) {
-              forceEndSentRef.current = true;
-              const targetAgent = agentUserIdRef.current;
-              const engineNow = engineRef.current;
-              const forceMsg =
-                `[FORCE_END] 候选人已回答完最后一题。立刻用一句话致谢然后结束面试,` +
-                `不要再问任何问题(包括追问)。例如:"感谢你今天的分享,面试就到这里,祝你顺利!"说完后保持沉默。`;
-              if (targetAgent && engineNow) {
-                try {
-                  const tlv = buildAgentCtrlMessage("ExternalTextToLLM", forceMsg, 2);
-                  (engineNow as any).sendUserBinaryMessage(targetAgent, tlv.buffer);
-                  console.log("[Call] FORCE_END sent after last answer");
-                } catch (sendErr) {
-                  console.warn("[Call] failed to send FORCE_END:", sendErr);
-                }
-              }
-              // 15s 兜底:LLM 不听话就客户端直接结束(给 AI 足够时间说致谢)
-              setTimeout(() => {
-                if (!isEnded) {
-                  console.log("[Call] FORCE_END 15s 兜底触发,客户端强制结束");
-                  handleEndCallRef.current();
-                }
-              }, 15_000);
-            }
+            // 注:不再向 LLM 推 [FORCE_END] 信号 ——
+            //   该路径之前以 ExternalTextToLLM(user 通道)注入,LLM 把它当候选人在
+            //   下指令"立刻结束",反过来诱导 LLM 提前结束 / 一次塞光所有题。
+            //   现在改成纯被动:让 LLM 按 system prompt 自己走完,结束语 + 静默探测
+            //   (awaitingFinalSilenceRef 那条路径)已经能把面试收住。
           }
         }
       });

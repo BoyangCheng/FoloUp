@@ -94,3 +94,65 @@ Output example (follow this shape exactly, key names must match):
 
 Strictly output only a JSON object with the keys 'questions' and 'description'.`;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "暗藏备用题"专用 prompt:
+//   - 用于 HR 完全手写主问题、没走 AI 生成流程时,后端在 create-interview API 里
+//     额外补 N 条 extra_questions（HR 看不到,候选人也看不到,只给 AI）。
+//   - 与 generateQuestionsPrompt 不同:这里不带 description 字段、只让 LLM 输出
+//     纯问题数组,prompt 也更短(只补 3 条,不需要 5 条备用)。
+// ─────────────────────────────────────────────────────────────────────────────
+export const generateExtraQuestionsPrompt = (
+  body: {
+    name: string;
+    objective: string;
+    existingQuestions: string[];
+    count: number;
+  },
+  language: "zh" | "en" = "zh",
+) => {
+  const existingList =
+    body.existingQuestions.length > 0
+      ? body.existingQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n")
+      : "(空)";
+
+  if (language === "zh") {
+    return `你是一位专业的面试问题设计专家。请基于以下面试信息,补充 ${body.count} 个备用面试问题。
+
+面试标题：${body.name}
+面试目标：${body.objective}
+
+HR 已选定的主问题清单:
+${existingList}
+
+要求:
+- 与上述主问题清单语义、角度不重复
+- 每个问题不超过 30 个字,简洁开放式
+- 用第二人称("你")提问,鼓励候选人详细作答
+- 偏向于行为面试 / 项目经验 / 解决问题能力
+
+只输出 JSON,格式:
+{ "questions": [{ "question": "..." }, ...] }
+
+共 ${body.count} 个元素,严格只输出这一个键的 JSON 对象,中文内容。`;
+  }
+
+  return `You are an expert interview-question designer. Based on the interview info below, generate ${body.count} additional backup questions.
+
+Interview title: ${body.name}
+Objective: ${body.objective}
+
+HR's already-selected primary questions:
+${existingList}
+
+Requirements:
+- Each must be semantically distinct from the primary questions
+- Each ≤ 30 words, concise and open-ended
+- Use second-person ("you") and encourage detailed answers
+- Prefer behavioral / project-experience / problem-solving angles
+
+Output only JSON:
+{ "questions": [{ "question": "..." }, ...] }
+
+Exactly ${body.count} items, strictly only this one key in the JSON object.`;
+};
